@@ -537,21 +537,21 @@ class BSPTree {
             if actualSize.width > leafRect.width + TilingConfig.minSizeConflictSlackPx,
                !adjustAxisRatio(from: leaf, needed: actualSize.width,
                                 axis: .horizontal, rect: padded, gap: gap,
-                                windowTitle: window.title, allowUserSet: false),
+                                windowID: window.windowID, windowTitle: window.title, allowUserSet: false),
                givingWayOnUserSet {
                 _ = adjustAxisRatio(from: leaf, needed: actualSize.width,
                                     axis: .horizontal, rect: padded, gap: gap,
-                                    windowTitle: window.title, allowUserSet: true)
+                                    windowID: window.windowID, windowTitle: window.title, allowUserSet: true)
             }
 
             if actualSize.height > leafRect.height + TilingConfig.minSizeConflictSlackPx,
                !adjustAxisRatio(from: leaf, needed: actualSize.height,
                                 axis: .vertical, rect: padded, gap: gap,
-                                windowTitle: window.title, allowUserSet: false),
+                                windowID: window.windowID, windowTitle: window.title, allowUserSet: false),
                givingWayOnUserSet {
                 _ = adjustAxisRatio(from: leaf, needed: actualSize.height,
                                     axis: .vertical, rect: padded, gap: gap,
-                                    windowTitle: window.title, allowUserSet: true)
+                                    windowID: window.windowID, windowTitle: window.title, allowUserSet: true)
             }
         }
     }
@@ -561,13 +561,16 @@ class BSPTree {
     @discardableResult
     private func adjustAxisRatio(from leaf: BSPNode, needed: CGFloat,
                                  axis: SplitDirection, rect: CGRect, gap: CGFloat,
-                                 windowTitle: String?, allowUserSet: Bool) -> Bool {
+                                 windowID: CGWindowID, windowTitle: String?,
+                                 allowUserSet: Bool) -> Bool {
         let halfGap = gap / 2
         var node: BSPNode = leaf
+        let axisText = axis == .horizontal ? "H" : "V"
+        var skippedUserSet = 0
 
         while let parent = node.parent {
             defer { node = parent }
-            if parent.userSetRatio && !allowUserSet { continue }
+            if parent.userSetRatio && !allowUserSet { skippedUserSet += 1; continue }
             guard let parentRect = rectForNodeHelper(node: root, target: parent, rect: rect, gap: gap) else { continue }
             guard parent.direction(for: parentRect) == axis else { continue }
 
@@ -577,26 +580,43 @@ class BSPTree {
 
             let raw = (needed + halfGap) / extent
             let clamped: CGFloat
+            let before = parent.splitRatio
             if isLeft {
                 clamped = min(raw, TilingConfig.maxRatio)
                 if clamped > parent.splitRatio {
                     parent.splitRatio = clamped
-                    hyprLog(.debug, .lifecycle, "adjusted \(axis == .horizontal ? "H" : "V") ratio → \(String(format: "%.2f", clamped)) for '\(windowTitle ?? "?")'")
                 }
             } else {
                 clamped = max(1.0 - raw, TilingConfig.minRatio)
                 if clamped < parent.splitRatio {
                     parent.splitRatio = clamped
-                    hyprLog(.debug, .lifecycle, "adjusted \(axis == .horizontal ? "H" : "V") ratio → \(String(format: "%.2f", clamped)) for '\(windowTitle ?? "?")'")
                 }
             }
+            // min-size ratio tuning: which split moved, from what, and
+            // whether the clamp left the window short of what it needs
+            hyprLog(.notice, .tiling, "min-size ratio: wid=\(windowID) '\(windowTitle ?? "?")' axis=\(axisText)"
+                    + " side=\(isLeft ? "first" : "second") needed=\(Int(needed.rounded())) extent=\(Int(extent.rounded()))"
+                    + " ratio=\(Self.ratioText(before))→\(Self.ratioText(parent.splitRatio))"
+                    + " raw=\(Self.ratioText(isLeft ? raw : 1.0 - raw))"
+                    + " clamped=\(isLeft ? raw > TilingConfig.maxRatio : 1.0 - raw < TilingConfig.minRatio)"
+                    + " userSet=\(parent.userSetRatio) allowUserSet=\(allowUserSet) skippedUserSet=\(skippedUserSet)")
 
             // see adjustForMinSizes doc comment: one conflict tunes one
             // ancestor on this axis. stacking 0.15/0.85 across multiple
             // ancestors creates effective 1/16 slots even with depth respected.
             return true
         }
+        hyprLog(.notice, .tiling, "min-size ratio: wid=\(windowID) '\(windowTitle ?? "?")' axis=\(axisText)"
+                + " needed=\(Int(needed.rounded())) — no ancestor on this axis to tune"
+                + " (skippedUserSet=\(skippedUserSet) allowUserSet=\(allowUserSet))")
         return false
+    }
+
+    static func ratioText(_ ratio: CGFloat) -> String { String(format: "%.3f", Double(ratio)) }
+
+    private static func rectText(_ rect: CGRect) -> String {
+        String(format: "(%g,%g,%g,%g)", Double(rect.minX), Double(rect.minY),
+               Double(rect.width), Double(rect.height))
     }
 
     /// Convert a manual user resize back into split-ratio updates.
@@ -609,17 +629,47 @@ class BSPTree {
     func applyResizeDelta(for window: HyprWindow, newFrame: CGRect,
                           in rect: CGRect, gap: CGFloat, padding: CGFloat) {
         let padded = rect.insetBy(dx: padding, dy: padding)
-        guard let leaf = root.find(window) else { return }
+        guard let leaf = root.find(window) else {
+            hyprLog(.notice, .tiling, "manual resize: wid=\(window.windowID) not in tree — no ratio change")
+            return
+        }
+        let leafRect = rectForNodeHelper(node: root, target: leaf, rect: padded, gap: gap)
+        hyprLog(.notice, .tiling, "manual resize: wid=\(window.windowID) '\(window.title ?? "?")'"
+                + " newFrame=\(Self.rectText(newFrame)) tile=\(leafRect.map(Self.rectText) ?? "nil")"
+                + " area=\(Self.rectText(padded)) depth=\(leaf.depth)")
 
         var node = leaf
         while let parent = node.parent {
             guard let parentRect = rectForNodeHelper(node: root, target: parent, rect: padded, gap: gap) else {
+                hyprLog(.notice, .tiling, "manual resize: wid=\(window.windowID) ancestor depth=\(parent.depth) has no rect — skipped")
                 node = parent
                 continue
             }
 
             let isLeft = parent.left === node
             let dir = parent.direction(for: parentRect)
+            // whether the resized window's edge is the edge this split owns.
+            // a window deeper in the subtree that does not touch the split
+            // still feeds its own edge into the ratio below
+            let nodeRect = rectForNodeHelper(node: root, target: node, rect: padded, gap: gap)
+            let onEdge: Bool? = leafRect.flatMap { lr in nodeRect.map { nr in
+                switch (dir, isLeft) {
+                case (.horizontal, true): return abs(lr.maxX - nr.maxX) <= 1
+                case (.horizontal, false): return abs(lr.minX - nr.minX) <= 1
+                case (.vertical, true): return abs(lr.maxY - nr.maxY) <= 1
+                case (.vertical, false): return abs(lr.minY - nr.minY) <= 1
+                }
+            } }
+            let before = parent.splitRatio
+            var computed = CGFloat.nan
+            defer {
+                hyprLog(.notice, .tiling, "manual resize: wid=\(window.windowID) ancestor depth=\(parent.depth)"
+                        + " axis=\(dir == .horizontal ? "H" : "V") side=\(isLeft ? "first" : "second")"
+                        + " parent=\(Self.rectText(parentRect)) leafOnSplitEdge=\(onEdge.map { "\($0)" } ?? "?")"
+                        + " ratio=\(Self.ratioText(before))→\(Self.ratioText(parent.splitRatio))"
+                        + " computed=\(Self.ratioText(computed))"
+                        + " \(before == parent.splitRatio ? "unchanged" : "changed") userSet=\(parent.userSetRatio)")
+            }
 
             switch dir {
             case .horizontal:
@@ -633,11 +683,11 @@ class BSPTree {
                     splitX = newFrame.origin.x - gap / 2
                 }
                 let newRatio = (splitX - parentRect.origin.x) / parentRect.width
+                computed = newRatio
                 let clamped = min(max(newRatio, TilingConfig.minRatio), TilingConfig.maxRatio)
                 if abs(clamped - parent.splitRatio) > TilingConfig.manualResizeRatioTolerance {
                     parent.splitRatio = clamped
                     parent.userSetRatio = true
-                    hyprLog(.debug, .lifecycle, "manual resize: horizontal ratio → \(String(format: "%.2f", clamped))")
                 }
 
             case .vertical:
@@ -648,11 +698,11 @@ class BSPTree {
                     splitY = newFrame.origin.y - gap / 2
                 }
                 let newRatio = (splitY - parentRect.origin.y) / parentRect.height
+                computed = newRatio
                 let clamped = min(max(newRatio, TilingConfig.minRatio), TilingConfig.maxRatio)
                 if abs(clamped - parent.splitRatio) > TilingConfig.manualResizeRatioTolerance {
                     parent.splitRatio = clamped
                     parent.userSetRatio = true
-                    hyprLog(.debug, .lifecycle, "manual resize: vertical ratio → \(String(format: "%.2f", clamped))")
                 }
             }
 

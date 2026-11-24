@@ -927,7 +927,10 @@ final class ActionDispatcher {
     /// excluded from the candidate set. While the scratchpad is up only its
     /// tiled members are candidates; the workspace under the scrim is out.
     private func focusInDirection(_ direction: Direction) {
-        guard let focused = currentFocusedWindow() else { return }
+        guard let focused = currentFocusedWindow() else {
+            hyprLog(.notice, .focus, "focus \(direction): no focused window — ignored")
+            return
+        }
         let layer = scratchpadLayer()
         // only consider windows on visible workspaces — hidden corner windows must be excluded
         let windows = accessibility.getAllWindows().filter {
@@ -945,9 +948,9 @@ final class ActionDispatcher {
             DirectionalGeometry.frame(for: $0.windowID, intended: intended, actual: $0.frame)
         }
         // diag: source rect (intended vs live) + physical screen. see directional-focus bug.
-        hyprLog(.debug, .orchestration, "focus \(direction): src '\(focused.title ?? "?")' (\(focused.windowID)) intended=\(intended[focused.windowID].map { "\($0)" } ?? "nil") live=\(focused.frame.map { "\($0)" } ?? "nil") screen=\(displayManager.screen(for: focused)?.localizedName ?? "?")")
+        hyprLog(.notice, .focus, "focus \(direction): src '\(focused.title ?? "?")' (\(focused.windowID)) intended=\(intended[focused.windowID].map { "\($0)" } ?? "nil") live=\(focused.frame.map { "\($0)" } ?? "nil") screen=\(displayManager.screen(for: focused)?.localizedName ?? "?")")
         if let target = accessibility.windowInDirection(direction, from: focused, among: windows, frameFor: frameFor) {
-            hyprLog(.debug, .orchestration, "focus \(direction): -> '\(target.title ?? "?")' (\(target.windowID)) frameFor=\(frameFor(target).map { "\($0)" } ?? "nil") live=\(target.frame.map { "\($0)" } ?? "nil") screen=\(displayManager.screen(for: target)?.localizedName ?? "?")")
+            hyprLog(.notice, .focus, "focus \(direction): -> '\(target.title ?? "?")' (\(target.windowID)) frameFor=\(frameFor(target).map { "\($0)" } ?? "nil") live=\(target.frame.map { "\($0)" } ?? "nil") screen=\(displayManager.screen(for: target)?.localizedName ?? "?")")
             focusController.recordFocus(target.windowID, reason: "focusInDirection")
             // the indicator first: after focusWindow the app is busy
             // activating, and reading its frame then waited ~140 ms, so the
@@ -955,6 +958,11 @@ final class ActionDispatcher {
             updateFocusBorder(target)
             focusWindow(target, "focusInDirection")
             cursorManager.warpToCenter(of: target)
+        } else {
+            hyprLog(.notice, .focus, "focus \(direction): no window in that direction from \(focused.windowID)"
+                    + " among \(windows.count) candidates [" + windows.map { w in
+                        "\(w.windowID):\(frameFor(w).map { "\($0)" } ?? "nil")"
+                    }.joined(separator: ", ") + "]")
         }
     }
 
@@ -1201,9 +1209,20 @@ final class ActionDispatcher {
 
     /// Resize the focused tiled window in a cardinal direction.
     private func resizeInDirection(_ direction: Direction) {
-        guard let focused = currentFocusedWindow(),
-              !stateCache.floatingWindowIDs.contains(focused.windowID),
-              let (workspace, screen) = tilingContext(for: focused) else { return }
+        guard let focused = currentFocusedWindow() else {
+            hyprLog(.notice, .tiling, "resizeDirection \(direction): no focused window — ignored")
+            return
+        }
+        guard !stateCache.floatingWindowIDs.contains(focused.windowID) else {
+            hyprLog(.notice, .tiling, "resizeDirection \(direction): wid=\(focused.windowID) is floating — ignored")
+            return
+        }
+        guard let (workspace, screen) = tilingContext(for: focused) else {
+            hyprLog(.notice, .tiling, "resizeDirection \(direction): wid=\(focused.windowID) has no tiling context — ignored")
+            return
+        }
+        hyprLog(.notice, .tiling, "resizeDirection \(direction): wid=\(focused.windowID) ws\(workspace)"
+                + " screen='\(screen.localizedName)' frame=\(focused.frame.map { "\($0)" } ?? "unread")")
 
         tilingEngine.resizeInDirection(focused, direction: direction, onWorkspace: workspace, screen: screen)
         if workspace == ScratchpadController.workspace { scratchpadLayoutChanged() }

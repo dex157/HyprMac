@@ -513,6 +513,24 @@ class WindowManager {
             usualFocus(window, fallback)
             self?.scheduleRestackRefresh(after: 0.1)
         }
+        // where a focus HyprMac asked for actually landed, a quarter second
+        // later: the front app and that app's AX focused window
+        tiledFocusRouter.checkLanding = { [weak self] target, reason in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+                guard let self, self.isRunning else { return }
+                let front = NSWorkspace.shared.frontmostApplication
+                let frontPID = front?.processIdentifier
+                let axFocused = frontPID.flatMap { self.accessibility.focusedWindowID(ofPID: $0) }
+                let landed = frontPID == target.ownerPID && axFocused == target.windowID
+                hyprLog(landed ? .debug : .notice, .focus, "focus landing: wanted=\(target.windowID)"
+                        + " pid=\(target.ownerPID) reason=\(reason)"
+                        + " front=\(front?.bundleIdentifier ?? "?") pid=\(frontPID.map(String.init) ?? "nil")"
+                        + " axFocused=\(axFocused.map(String.init) ?? "nil")"
+                        + " recorded=\(self.focusController.lastFocusedID)"
+                        + " border=\(self.focusBorder.trackedWindowID.map(String.init) ?? "nil")"
+                        + (landed ? " — landed" : " — DID NOT LAND"))
+            }
+        }
 
         wireAdmissionRecovery()
         admissionRecovery.terminalOutcome = { [weak self] workspace, screen, result in
@@ -2747,6 +2765,11 @@ class WindowManager {
     /// already manages on screen (`FocusPollGate`).
     private func scheduleFocusPoll(pid: pid_t, via: String, after delay: TimeInterval) {
         let focused = accessibility.focusedWindowID(ofPID: pid)
+        hyprLog(.notice, .focus, "focus event: via=\(via) pid=\(pid) axFocused=\(focused.map(String.init) ?? "nil")"
+                + " recorded=\(focusController.lastFocusedID)"
+                + " border=\(focusBorder.trackedWindowID.map(String.init) ?? "nil")"
+                + " known=\(focused.map { stateCache.knownWindowIDs.contains($0) } ?? false)"
+                + " ws=\(focused.flatMap { workspaceManager.workspaceFor($0) }.map(String.init) ?? "?")")
         let needed = FocusPollGate.needsPoll(
             focusedID: focused,
             scratchpadUp: scratchpad.isVisible,
@@ -2921,6 +2944,11 @@ class WindowManager {
         var causedByHyprMac = false
         if let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication {
             causedByHyprMac = suppressions.consumeExpectedActivation(of: app.processIdentifier)
+            hyprLog(.notice, .focus, "app activated: \(app.bundleIdentifier ?? "?") pid=\(app.processIdentifier)"
+                    + " byHyprMac=\(causedByHyprMac)"
+                    + " activationSwitchSuppressed=\(suppressions.isSuppressed(.activationSwitch))"
+                    + " recorded=\(focusController.lastFocusedID)"
+                    + " border=\(focusBorder.trackedWindowID.map(String.init) ?? "nil")")
         }
 
         // dock-click workspace switch — only when NOT suppressed by FFM/switch/raise

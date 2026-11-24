@@ -28,12 +28,18 @@ final class TiledFocusRouter {
     /// puts `target` above any floater still over it. the usual focus only does
     /// that for some apps: hovering Dia lifted it and hovering Terminal didn't
     var liftOverFloaters: (HyprWindow) -> Void = { _ in }
+    /// told after every focus, to check later where focus actually landed.
+    /// Only a log line comes of it.
+    var checkLanding: (HyprWindow, String) -> Void = { _, _ in }
 
     func focus(_ target: HyprWindow, reason: String, fallback: Fallback) {
-        hyprLog(.debug, .focus, "router focus: wid=\(target.windowID) reason=\(reason)")
+        hyprLog(.notice, .focus, "router focus: wid=\(target.windowID) pid=\(target.ownerPID)"
+                + " '\(target.title ?? "?")' reason=\(reason) fallback=\(fallback.rawValue)"
+                + " frame=\(target.frame.map { "\($0)" } ?? "unread")")
         noteActivation(target.ownerPID)
         raiseFloatersBeforeFocus(target)
         usualFocus(target, fallback)
         liftOverFloaters(target)
+        checkLanding(target, reason)
     }
 }

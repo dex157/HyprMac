@@ -12,7 +12,7 @@ import Cocoa
 /// this controller exposes that as a pass-through getter so callers do
 /// not have to know about `FocusBorder` directly.
 ///
-/// Every transition is logged at `.debug` under the `.focus` category, so
+/// Every transition is logged at `.notice` under the `.focus` category, so
 /// the focus history is greppable from Console.
 ///
 /// Threading: main-thread only. No synchronization.
@@ -49,7 +49,8 @@ final class FocusStateController {
         let prev = lastFocusedID
         lastFocusedID = id
         generation &+= 1
-        hyprLog(.debug, .focus, "focus \(prev) → \(id) (\(reason))")
+        hyprLog(.notice, .focus, "focus \(prev) → \(id) (\(reason)) gen=\(generation)"
+                + " border=\(focusBorder.trackedWindowID.map(String.init) ?? "nil")")
         onChange()
     }
 }

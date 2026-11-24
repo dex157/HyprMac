@@ -103,10 +103,15 @@ final class TiledDriftMonitor {
             }
             switch states[reading.windowID] {
             case nil:
+                hyprLog(.notice, .tiling, "tiled drift seen: \(reading.windowID) ws\(reading.workspace)"
+                        + " actual=\(Self.text(reading.actual)) intended=\(Self.text(reading.intended))"
+                        + " \(Self.deltaText(reading)) — waiting one poll for it to settle")
                 states[reading.windowID] = .seen(reading.actual)
             case let .seen(previous):
                 guard Self.settled(previous, reading.actual) else {
                     // still moving — an animation, not a frame the app means
+                    hyprLog(.debug, .tiling, "tiled drift still moving: \(reading.windowID)"
+                            + " was=\(Self.text(previous)) now=\(Self.text(reading.actual))")
                     states[reading.windowID] = .seen(reading.actual)
                     continue
                 }
@@ -121,9 +126,16 @@ final class TiledDriftMonitor {
                                           windowID: reading.windowID))
             case let .reapplied(at):
                 guard now().timeIntervalSince(at) <= recurrenceWindow else {
+                    hyprLog(.notice, .tiling, "tiled drift again: \(reading.windowID) ws\(reading.workspace)"
+                            + " \(Int(now().timeIntervalSince(at) * 1000))ms after the re-apply — a new episode"
+                            + " actual=\(Self.text(reading.actual)) intended=\(Self.text(reading.intended))")
                     states[reading.windowID] = .seen(reading.actual)
                     continue
                 }
+                hyprLog(.notice, .tiling, "tiled drift recurred: \(reading.windowID) ws\(reading.workspace)"
+                        + " \(Int(now().timeIntervalSince(at) * 1000))ms after the re-apply"
+                        + " actual=\(Self.text(reading.actual)) intended=\(Self.text(reading.intended))"
+                        + " \(Self.deltaText(reading))")
                 states[reading.windowID] = .recurred(at, reading.actual)
             case let .recurred(at, previous):
                 guard now().timeIntervalSince(at) <= recurrenceWindow else {
@@ -166,6 +178,14 @@ final class TiledDriftMonitor {
             && abs(first.minY - second.minY) <= positionTolerance
             && abs(first.width - second.width) <= positionTolerance
             && abs(first.height - second.height) <= positionTolerance
+    }
+
+    private static func deltaText(_ reading: TiledDriftReading) -> String {
+        String(format: "dx=%g dy=%g dw=%g dh=%g",
+               Double(reading.actual.minX - reading.intended.minX),
+               Double(reading.actual.minY - reading.intended.minY),
+               Double(reading.actual.width - reading.intended.width),
+               Double(reading.actual.height - reading.intended.height))
     }
 
     private static func text(_ rect: CGRect) -> String {

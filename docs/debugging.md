@@ -574,6 +574,59 @@ wide and took 541.
 Sizes include the title bar. No limit reads as 0x0 or 1x1 for min and
 100000 or `inf` for max. A window that cannot resize reads all zeros.
 
+## Resize, positioning and focus traces
+
+All of these are `.notice`, so `log show` keeps them as well as the file log.
+They were added to chase resize, positioning and focus bugs.
+
+Tiling (`category: tiling`):
+
+- `layout plan: gen=<n> rect=(x,y,w,h) gap=<> padding=<> knownMinAdjusted=[…]
+  held=[…] windows=[<id>:<original>→<target>, …]`: once per verified pass,
+  before any write. It shows what the tree asked for and where each window
+  was.
+- `layout accepted: gen=<n> phase=<candidate|adjusted> off=[…]`: the pass was
+  accepted. `off` lists windows that are more than a point from target. The
+  adjusted phase also prints its targets.
+- `retile ws<N>: resetting automatic ratios depth<d>=<r>,… → 0.500`: a
+  retile is about to drop a non-user ratio, such as a min-size skew.
+- `min-size ratio: wid=<id> axis=<H|V> side=<first|second> needed=<px>
+  extent=<px> ratio=<old>→<new> raw=<> clamped=<bool> userSet=<>
+  allowUserSet=<> skippedUserSet=<n>`: the split a min-size conflict moved.
+  A `… — no ancestor on this axis to tune` line follows when no split could
+  move.
+- `manual resize: wid=<id> newFrame=… tile=… area=… depth=<d>`, then one line
+  per ancestor: `axis= side= parent=… leafOnSplitEdge=<bool> ratio=<old>→<new>
+  computed=<raw> changed|unchanged userSet=`. `leafOnSplitEdge=false` means
+  the window's edge is not the edge this split owns, yet its frame still fed
+  the ratio.
+- `resizeDirection <dir>: …`: the keyboard resize. The dispatcher logs why it
+  ignored the key (no focus, floating, no tiling context). The engine logs the
+  split it moved (`ratio=<old>→<new>`), or why it moved none (`already at the
+  limit`, `no ancestor splits the … axis`, `not in the tree`). Then it logs
+  `resizeDirection <dir> result: … accepted|rejected|degraded — published|tree
+  restored`. `toggleSplit result:` has the same shape.
+- `tiled drift seen:` (first poll, with `dx dy dw dh`), `tiled drift recurred:`
+  and `tiled drift again:` (a new episode after the recurrence window), around
+  the existing `tiled drift:` re-apply and abandon lines.
+
+Focus (`category: focus`):
+
+- `focus <old> → <new> (<reason>) gen=<n> border=<id>`: every recorded focus
+  change.
+- `router focus: wid= pid= '<title>' reason= fallback= frame=`: every focus
+  HyprMac sends, whether from hover, Hypr+Arrow or the invariant.
+- `focus landing: wanted=<id> … front=<bundle> pid= axFocused=<id> recorded=
+  border= — landed|DID NOT LAND`: 250 ms after each router focus. `DID NOT
+  LAND` is at notice and `landed` at debug.
+- `focus <dir>: src …`, `focus <dir>: -> …`, and `focus <dir>: no window in
+  that direction from <id> among <n> candidates […]` for Hypr+Arrow.
+- `app activated: <bundle> pid= byHyprMac=<bool> activationSwitchSuppressed=
+  recorded= border=`: every app activation.
+- `focus event: via=<axFocus|activation> pid= axFocused=<id> recorded= border=
+  known= ws=`: AX focus changes and HyprMac's own activations, before the
+  focus poll gate.
+
 ## On-demand state dump
 
 `WorkspaceStatusPresenter.dumpState(reason:)` logs a `.notice` block under

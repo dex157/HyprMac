@@ -1582,6 +1582,14 @@ class TilingEngine {
             candidate.adjustForMinSizes(known, in: rect, gap: gapSize, padding: outerPadding)
         }
         let firstLayouts = writable(candidate.layout(in: rect, gap: gapSize, padding: outerPadding))
+        hyprLog(.notice, .tiling, "layout plan: gen=\(generation) rect=\(Self.rectText(rect))"
+                + " gap=\(gapSize) padding=\(outerPadding) knownMinAdjusted=["
+                + known.map { "\($0.window.windowID):\(Self.sizeText($0.actual))" }.joined(separator: ",") + "]"
+                + " held=\(unwrittenWindowIDs.intersection(tree.allWindows.map(\.windowID)).sorted())"
+                + " windows=[" + firstLayouts.map { window, target -> String in
+                    let from = originalFrames[window.windowID].map(Self.rectText) ?? "unread"
+                    return "\(window.windowID):\(from)→\(Self.rectText(target))"
+                }.joined(separator: ", ") + "]")
         // a window arriving from a screen with a different backing scale
         // makes its app redraw at the new scale while our calls queue behind
         // it. that pass, and a rollback carrying it back, get the longer
@@ -1618,6 +1626,8 @@ class TilingEngine {
                                       budget: budget, scalePoller: scalePoller, poller: poller)
         let first = runFirstPass(attempt)
         if case .accepted = first.verdict {
+            hyprLog(.notice, .tiling, "layout accepted: gen=\(generation) phase=candidate"
+                    + Self.offTargetTrace(firstLayouts, actual: first.actualFrames))
             adoptFirstRatios(attempt)
             return .accepted(actualFrames: first.actualFrames,
                              progress: FrameSizingProgressReport(candidate: first.progress))
@@ -1743,6 +1753,10 @@ class TilingEngine {
                                                    poller: adjustedPoller)
                 terminal.adopt = { self.copyVerifiedRatios(from: candidate.root, to: tree.root) }
                 if case .accepted = terminal.result.verdict {
+                    hyprLog(.notice, .tiling, "layout accepted: gen=\(generation) phase=adjusted"
+                            + " windows=[" + adjusted.map { "\($0.0.windowID):\(Self.rectText($0.1))" }
+                                .joined(separator: ", ") + "]"
+                            + Self.offTargetTrace(adjusted, actual: terminal.result.actualFrames))
                     copyVerifiedRatios(from: candidate.root, to: tree.root)
                     return .finished(.accepted(actualFrames: terminal.result.actualFrames,
                                                progress: FrameSizingProgressReport(candidate: terminal.result.progress)))
@@ -3082,9 +3096,32 @@ class TilingEngine {
         let rect = layoutRect(for: key, screen: screen)
         let generation = suppliedGeneration ?? beginLayoutGeneration()
 
+        let reset = Self.autoRatiosOffDefault(t.root)
+        if !reset.isEmpty {
+            // a min-size skew that the retile is about to throw away. the
+            // verified pass may put it back if the app still refuses
+            hyprLog(.notice, .tiling, "retile ws\(key.workspace): resetting automatic ratios "
+                    + reset.map { "depth\($0.depth)=\(BSPTree.ratioText($0.ratio))" }.joined(separator: ",")
+                    + " → \(BSPTree.ratioText(TilingConfig.defaultRatio))")
+        }
         t.root.resetSplitRatios()
 
         return applyTrackedLayout(t, in: rect, generation: generation, key: key)
+    }
+
+    /// Inner nodes whose ratio `resetSplitRatios` would move: not set by
+    /// the user and not at the default.
+    private static func autoRatiosOffDefault(_ node: BSPNode) -> [(depth: Int, ratio: CGFloat)] {
+        var result: [(depth: Int, ratio: CGFloat)] = []
+        func walk(_ n: BSPNode) {
+            if !n.isLeaf, !n.userSetRatio, abs(n.splitRatio - TilingConfig.defaultRatio) > 0.0005 {
+                result.append((n.depth, n.splitRatio))
+            }
+            if let l = n.left { walk(l) }
+            if let r = n.right { walk(r) }
+        }
+        walk(node)
+        return result
     }
 
     private enum SwapFit {
@@ -3205,8 +3242,25 @@ class TilingEngine {
         let generation = beginLayoutGeneration()
         t.toggleSplit(for: window, in: rect, gap: gapSize, padding: outerPadding)
         let outcome = retile(key: key, screen: screen, generation: generation)
+        Self.logUserLayoutOutcome("toggleSplit", window: window.windowID, workspace: workspace,
+                                  outcome: outcome, superseded: layoutGeneration != generation)
         if case .accepted = outcome { return }
         if layoutGeneration == generation { t.restore(snapshot) }
+    }
+
+    /// One `.notice` line for the result of a keyboard layout change, so a
+    /// resize or split toggle that silently rolled back shows up in Console.
+    private static func logUserLayoutOutcome(_ name: String, window: CGWindowID, workspace: Int,
+                                             outcome: LayoutApplicationOutcome, superseded: Bool) {
+        let verdict: String
+        switch outcome {
+        case .accepted: verdict = "accepted"
+        case let .rejectedRestored(reason, _, _): verdict = "rejected (\(reason.trace))"
+        case let .degraded(candidate, restoration, _, _, _):
+            verdict = "degraded (candidate=\(candidate.trace) restoration=\(restoration?.trace ?? "nil"))"
+        }
+        let tree = superseded ? "superseded, tree left as is" : (verdict == "accepted" ? "published" : "tree restored")
+        hyprLog(.notice, .tiling, "\(name) result: wid=\(window) ws\(workspace) \(verdict) — \(tree)")
     }
 
     /// Resize the focused window by moving the nearest matching-axis split
@@ -3220,7 +3274,11 @@ class TilingEngine {
         let t = tree(for: key)
         let rect = layoutRect(for: key, screen: screen)
 
-        guard let leaf = t.root.find(window) else { return }
+        guard let leaf = t.root.find(window) else {
+            hyprLog(.notice, .tiling, "resizeDirection \(direction): wid=\(window.windowID) ws\(workspace)"
+                    + " not in the tree for '\(screen.localizedName)' — nothing to resize")
+            return
+        }
         let snapshot = t.snapshot()
         let generation = beginLayoutGeneration()
 
@@ -3235,6 +3293,8 @@ class TilingEngine {
                 continue
             }
             guard parent.direction(for: parentRect) == axis else {
+                hyprLog(.debug, .tiling, "resizeDirection \(direction): wid=\(window.windowID)"
+                        + " ancestor depth=\(parent.depth) splits the other axis — walking up")
                 node = parent
                 continue
             }
@@ -3245,18 +3305,33 @@ class TilingEngine {
             // the arrow, growing or shrinking as geometry allows.
             let delta: CGFloat = positive ? TilingConfig.resizeStep : -TilingConfig.resizeStep
             let newRatio = min(max(parent.splitRatio + delta, TilingConfig.minRatio), TilingConfig.maxRatio)
-            guard newRatio != parent.splitRatio else { break }
+            guard newRatio != parent.splitRatio else {
+                hyprLog(.notice, .tiling, "resizeDirection \(direction): wid=\(window.windowID) ws\(workspace)"
+                        + " ancestor depth=\(parent.depth) already at the limit ratio=\(BSPTree.ratioText(newRatio))"
+                        + " — nothing written")
+                break
+            }
+            let before = parent.splitRatio
             parent.splitRatio = newRatio
             parent.userSetRatio = true
             didResize = true
-            hyprLog(.debug, .tiling, "resizeDirection \(direction): ratio → \(String(format: "%.2f", newRatio))")
+            hyprLog(.notice, .tiling, "resizeDirection \(direction): wid=\(window.windowID) ws\(workspace)"
+                    + " ancestor depth=\(parent.depth) side=\(parent.left === node ? "first" : "second")"
+                    + " parent=\(parentRect) ratio=\(BSPTree.ratioText(before))→\(BSPTree.ratioText(newRatio))"
+                    + " tile=\(t.rectForNode(leaf, in: rect, gap: gapSize, padding: outerPadding).map { "\($0)" } ?? "nil")")
             break
         }
 
         if didResize {
             let outcome = retile(key: key, screen: screen, generation: generation)
+            Self.logUserLayoutOutcome("resizeDirection \(direction)", window: window.windowID,
+                                      workspace: workspace, outcome: outcome,
+                                      superseded: layoutGeneration != generation)
             if case .accepted = outcome { return }
             if layoutGeneration == generation { t.restore(snapshot) }
+        } else if node.parent == nil {
+            hyprLog(.notice, .tiling, "resizeDirection \(direction): wid=\(window.windowID) ws\(workspace)"
+                    + " no ancestor splits the \(axis == .horizontal ? "horizontal" : "vertical") axis — nothing written")
         }
     }
 
@@ -3357,6 +3432,11 @@ class TilingEngine {
         }
         hyprLog(.notice, .tiling, "fit outlook: incoming=\(incoming) ws\(workspace)"
                 + " verdict=\(verdict) refusals=\(refusals.count)")
+    }
+
+    private static func rectText(_ rect: CGRect) -> String {
+        String(format: "(%g,%g,%g,%g)", Double(rect.minX), Double(rect.minY),
+               Double(rect.width), Double(rect.height))
     }
 
     private static func sizeText(_ size: CGSize) -> String {
